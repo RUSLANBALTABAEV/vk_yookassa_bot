@@ -1,0 +1,84 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+env.bak/
+venv.bak/
+
+# === OS-specific ===
+.DS_Store
+Thumbs.db
+
+# === IDEs / Editors ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Logs & Cache ===
+*.log
+*.out
+*.tmp
+*.bak
+.cache/
+pytest_cache/
+__pypackages__/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# === Environment & Secrets ===
+.env
+*.env
+.env.*
+.envrc
+*.pem
+*.key
+
+# === Database / Data ===
+*.db
+*.sqlite3
+*.sqlite
+*.sql
+*.pgdata
+dump.sql
+data/
+backups/
+
+# === PyInstaller / Build ===
+build/
+dist/
+*.spec
+
+# === Reports / Notebooks ===
+*.ipynb_checkpoints
+notebooks/.ipynb_checkpoints/
+reports/
+
+# === Static / Generated ===
+staticfiles/
+media/
+uploads/
+
+# === Docker ===
+docker-compose.override.yml
+.docker/
+*.pid
+
+# === Test / Temp ===
+tmp/
+temp/
+.tox/
+*.pytest_cache/
+
+# === Misc ===
+# compiled translations, etc.
+*.mo
+*.pot
