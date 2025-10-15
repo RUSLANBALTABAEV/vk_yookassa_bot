@@ -1,6 +1,9 @@
-Flask
+Flaskp
 python-dotenv
 psycopg2-binary
 requests
 yookassa
-vk_api
+vk-api
+gunicorn
+pytest
+pytest-cov
