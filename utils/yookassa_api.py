@@ -1,114 +1,120 @@
-# utils/yookassa_api.py
-
-import os
 import uuid
-import hmac
-import hashlib
 from typing import Dict, Any
 from yookassa import Configuration, Payment
-from flask import Flask, request, jsonify
+from config import YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY, BASE_URL
 from utils.db import set_payment, mark_paid
-from utils.vk_api_wrapper import VKBot
+import json
+from pathlib import Path
+import logging
 
-# Конфигурация из .env
-Configuration.account_id = os.getenv("YOOKASSA_SHOP_ID")
-Configuration.secret_key = os.getenv("YOOKASSA_SECRET_KEY")
+logger = logging.getLogger(__name__)
 
-BASE_URL = os.getenv("BASE_URL", "https://example.com")
-PRIVATE_GROUP_URL = os.getenv("PRIVATE_GROUP_URL", "https://vk.com/club233286501")
-YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
+# Загружаем сообщения
+try:
+    MESSAGES = json.load(open(Path(__file__).parent.parent / "static" / "messages.json", encoding="utf-8"))
+except Exception as e:
+    logger.error(f"Error loading messages: {e}")
+    MESSAGES = {}
 
-app = Flask(__name__)
+# Настройка официального SDK
+Configuration.account_id = YOOKASSA_SHOP_ID
+Configuration.secret_key = YOOKASSA_SECRET_KEY
 
 
-# === 1️⃣ Создание платежа ===
 def create_payment_for_user(user_vk_id: int, amount: float) -> Dict[str, Any]:
     """
-    Создаёт платёж в YooKassa, сохраняет его в БД и возвращает ссылку.
+    Создаёт платёж в YooKassa и возвращает confirmation_url и payment.id.
     """
-    idempotence_key = uuid.uuid4().hex
-    payment = Payment.create({
-        "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
-        "confirmation": {
-            "type": "redirect",
-            "return_url": f"{BASE_URL}/"
-        },
-        "capture": True,
-        "description": f"Оплата материалов от пользователя {user_vk_id}",
-        "metadata": {"user_vk_id": str(user_vk_id)}
-    }, idempotence_key)
+    try:
+        idempotence_key = uuid.uuid4().hex
+        payment = Payment.create({
+            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+            "confirmation": {"type": "redirect", "return_url": f"{BASE_URL}/"},
+            "capture": True,
+            "description": f"Оплата материалов user {user_vk_id}",
+            "metadata": {"user_vk_id": str(user_vk_id)}
+        }, idempotence_key)
 
-    payment_id = payment.id
-    confirmation_url = payment.confirmation.confirmation_url
+        payment_id = payment.id
+        confirmation_url = payment.confirmation.confirmation_url
+        
+        # Сохраняем привязку в БД
+        set_payment(user_vk_id, payment_id, amount, "RUB")
+        
+        logger.info(f"Payment created: {payment_id}, amount: {amount}, user: {user_vk_id}")
+        
+        return {
+            "payment_id": payment_id,
+            "url": confirmation_url
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating payment for user {user_vk_id}: {e}")
+        raise
 
-    # Сохраняем информацию в PostgreSQL
-    set_payment(user_vk_id, payment_id, amount, "RUB")
 
-    return {"payment_id": payment_id, "url": confirmation_url}
-
-
-# === 2️⃣ Проверка подписи ===
-def verify_signature(secret: str, data: bytes, header: str) -> bool:
+def process_webhook_event(payload: Dict[str, Any], vkbot) -> None:
     """
-    Проверка подлинности webhook-запроса от YooKassa (HMAC SHA256).
+    Обрабатывает JSON webhook от YooKassa.
+    Ожидаем структуру: {'event': 'payment.succeeded', 'object': {...}}
+    После успешной оплаты отправляет пользователю подтверждение и уникальную ссылку с токеном.
     """
-    if not header:
-        return False
-    digest = hmac.new(secret.encode(), msg=data, digestmod=hashlib.sha256).hexdigest()
-    if header.startswith("sha256="):
-        header = header.split("=", 1)[1]
-    return hmac.compare_digest(digest, header)
+    try:
+        event = payload.get("event")
+        obj = payload.get("object", {})
+        
+        if not obj:
+            logger.warning("Empty webhook object")
+            return
 
-
-# === 3️⃣ Обработка успешной оплаты ===
-def process_payment_success(payment_id: str, user_vk_id: str):
-    """
-    Отмечает платёж как оплаченный и уведомляет пользователя.
-    """
-    mark_paid(payment_id)
-    vk = VKBot()
-    vk.send_message(
-        int(user_vk_id),
-        "✅ Оплата подтверждена! 🎉 Доступ к материалам открыт."
-    )
-    vk.send_message(
-        int(user_vk_id),
-        f"📚 Перейдите по ссылке: {PRIVATE_GROUP_URL}"
-    )
-
-
-# === 4️⃣ Webhook от YooKassa ===
-@app.route("/yookassa/webhook", methods=["POST"])
-def webhook():
-    """
-    Обработка уведомлений от YooKassa о статусе платежей.
-    """
-    raw_data = request.data
-    signature = request.headers.get("X-Request-Signature-SHA256")
-
-    # Проверка подписи
-    if not verify_signature(YOOKASSA_SECRET_KEY, raw_data, signature):
-        print("❌ Подпись не прошла проверку. Запрос отклонён.")
-        return jsonify({"status": "forbidden"}), 403
-
-    data = request.json
-    event = data.get("event")
-
-    if event == "payment.succeeded":
-        payment_obj = data.get("object", {})
-        payment_id = payment_obj.get("id")
-        metadata = payment_obj.get("metadata", {})
-        user_vk_id = metadata.get("user_vk_id")
-
-        print(f"✅ Платёж {payment_id} успешно завершён пользователем {user_vk_id}")
-        process_payment_success(payment_id, user_vk_id)
-
-    else:
-        print(f"⚠️ Получено событие {event}, не 'payment.succeeded'")
-
-    return jsonify({"status": "ok"})
-
-
-if __name__ == "__main__":
-    print("🚀 Запуск локального Flask-сервера для приёма webhook от YooKassa...")
-    app.run(host="0.0.0.0", port=int(os.getenv("FLASK_PORT", 5000)))
+        status = obj.get("status")
+        payment_id = obj.get("id")
+        metadata = obj.get("metadata", {})
+        user_vk = metadata.get("user_vk_id")
+        
+        logger.info(f"Webhook event: {event}, status: {status}, payment: {payment_id}")
+        
+        if status == "succeeded" and payment_id:
+            # Обновляем БД — отмечаем, что оплата прошла и генерируем токен
+            token = mark_paid(payment_id)
+            
+            # Отправляем пользователю сообщение с подтверждением
+            if user_vk and token:
+                try:
+                    # Сообщение подтверждения
+                    confirmation_msg = MESSAGES.get("payment_confirmed", "✅ Оплата подтверждена!")
+                    vkbot.send_message(int(user_vk), confirmation_msg)
+                    
+                    # Генерируем уникальную ссылку с токеном
+                    access_url = f"{BASE_URL}/access?token={token}"
+                    # Оборачиваем в VK away.php для безопасности
+                    vk_away_url = f"https://vk.com/away.php?to={access_url}"
+                    
+                    access_msg = MESSAGES.get("access_ready", 
+                        "✅ Доступ открыт!\n\n🔗 Ваша личная ссылка:\n{url}").format(url=vk_away_url)
+                    vkbot.send_message(int(user_vk), access_msg)
+                    
+                    logger.info(f"Access link sent to user {user_vk}")
+                    
+                except Exception as exc:
+                    logger.error(f"Error sending VK message to {user_vk}: {exc}")
+        
+        elif status == "canceled":
+            logger.info(f"Payment {payment_id} canceled")
+            if user_vk:
+                try:
+                    vkbot.send_message(int(user_vk), "⏸️ Платеж отменён")
+                except Exception as exc:
+                    logger.error(f"Error sending cancel message: {exc}")
+        
+        elif status == "failed":
+            logger.warning(f"Payment {payment_id} failed")
+            if user_vk:
+                try:
+                    vkbot.send_message(int(user_vk), 
+                        "❌ Платеж не прошёл. Попробуйте ещё раз, написав 'купить'")
+                except Exception as exc:
+                    logger.error(f"Error sending fail message: {exc}")
+                    
+    except Exception as e:
+        logger.error(f"Error processing webhook event: {e}", exc_info=True)
